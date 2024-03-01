@@ -1,0 +1,86 @@
+在FreeRTOS中，xQueueSendFromISR() 是一个中断安全的函数，允许在中断服务程序（ISR）中向队列发送消息。当在ISR中调用此函数时，它会尽可能快速地尝试将消息放入队列，并返回一个指示操作是否成功的布尔值以及一个 BaseType_t 类型的输出参数 pxHigherPriorityTaskWoken。
+
+pxHigherPriorityTaskWoken 参数用于记录此次发送操作是否唤醒了一个优先级高于当前运行任务的任务。如果 ISR 中的 xQueueSendFromISR() 调用导致了高优先级任务的就绪，那么这个变量会被设置为 pdTRUE。
+
+当您在同一个ISR中多次调用 xQueueSendFromISR() 传递多个消息时，每次调用后都需要检查 pxHigherPriorityTaskWoken 的值：
+
+首次调用：初始化 pxHigherPriorityTaskWoken 为 pdFALSE。
+每次调用后：检查 pxHigherPriorityTaskWoken 是否变为 pdTRUE，表示有更高优先级的任务因本次或之前的发送操作而变得可执行。
+最后一次调用之后：根据所有 xQueueSendFromISR() 调用累积的结果，决定是否需要调用 portYIELD_FROM_ISR()。
+何时使用 portYIELD_FROM_ISR()：
+
+如果在任何一次 xQueueSendFromISR() 调用过程中，pxHigherPriorityTaskWoken 变为了 pdTRUE，则应在所有消息发送完毕后调用 portYIELD_FROM_ISR(pxHigherPriorityTaskWoken)。
+这样做是因为 portYIELD_FROM_ISR() 会通知FreeRTOS内核在退出ISR时进行上下文切换，从而可能调度那个被唤醒的高优先级任务来执行。
+总结一下，在中断服务程序中多次使用 xQueueSendFromISR() 后，只需在最后一个消息发送完成后，且 pxHigherPriorityTaskWoken 至少有一次被置为 pdTRUE 时调用 portYIELD_FROM_ISR(pxHigherPriorityTaskWoken) 即可。如果从未发生过优先级反转，则无需调用 portYIELD_FROM_ISR()。
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+
+// 假设我们定义了一个队列
+QueueHandle_t xMyQueue;
+
+void vISRHandler(void *pvParameters)
+{
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    TaskHandle_t xTaskToNotify = NULL; // 用于演示，实际中可能不需要这个变量
+
+    // 假设有多个消息需要发送
+    for (int i = 0; i < 5; i++)
+    {
+        // 消息内容（这里仅作为示例）
+        uint32_t ulMessage = i;
+
+        // 尝试从ISR向队列发送消息
+        if (xQueueSendFromISR(xMyQueue, &ulMessage, &xHigherPriorityTaskWoken) != pdPASS)
+        {
+            // 发送失败，处理错误情况...
+        }
+
+        // 检查是否有高优先级任务被唤醒
+        if (xHigherPriorityTaskWoken == pdTRUE)
+        {
+            // 记录被唤醒的任务（此处仅为演示）
+            xTaskToNotify = xTaskGetCurrentTaskHandle();
+        }
+    }
+
+    // 在所有消息发送完毕后，检查是否需要进行上下文切换
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+void vTaskA( void *pvParameters )
+{
+    while (1)
+    {
+        // 任务执行代码...
+
+        // 假设在此处触发了中断
+        // 触发 ISR 的代码未展示在此处
+    }
+}
+
+void vTaskB( void *pvParameters )
+{
+    while (1)
+    {
+        uint32_t ulReceivedMessage;
+
+        // 从队列接收消息
+        if (xQueueReceive(xMyQueue, &ulReceivedMessage, portMAX_DELAY))
+        {
+            // 处理接收到的消息...
+        }
+    }
+}
+
+void app_main()
+{
+    // 创建队列
+    xMyQueue = xQueueCreate(/* 队列长度 */, sizeof(uint32_t));
+
+    // 创建任务
+    xTaskCreate(vTaskA, "TaskA", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL);
+    xTaskCreate(vTaskB, "TaskB", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 2, NULL);
+
+    // 其他初始化代码...
+}
